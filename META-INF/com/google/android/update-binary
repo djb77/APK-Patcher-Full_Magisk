@@ -28,9 +28,39 @@ imageless_magisk() {
 ##########################################################################################
 # Environment
 
+test "$ANDROID_ROOT" || ANDROID_ROOT=/system;
 show_progress() { echo "progress $1 $2" > $OUTFD; }
 set_progress() { echo "set_progress $1" > $OUTFD; }
 abort() { ui_print " "; ui_print "$*"; exit 1; }
+setup_mountpoint() {
+  test -L $1 && $bb mv -f $1 ${1}_link;
+  if [ ! -d $1 ]; then
+    rm -f $1;
+    mkdir $1;
+  fi;
+}
+is_mounted() { $bb mount | $bb grep -q " $1 "; }
+umount_all() {
+  ($bb umount /system;
+  $bb umount -l /system;
+  if [ -e /system_root ]; then
+    $bb umount /system_root;
+    $bb umount -l /system_root;
+  fi;
+  umount /vendor;
+  umount -l /vendor;
+  if [ "$umount_data" ]; then
+    $bb umount /data;
+    $bb umount -l /data;
+  fi) 2>/dev/null;
+}
+restore_env() {
+  test "$savedpath" && export LD_LIBRARY_PATH="$savedpath";
+  test "$savedpre" && export LD_PRELOAD="$savedpre";
+  umount_all;
+  ($bb mv -f /system_link /system;
+  $bb mv -f /system_root_link /system_root) 2>/dev/null;
+}
 
 ##########################################################################################
 
@@ -142,6 +172,40 @@ for apkp_target in $apklist; do
   progress=$((progress + subamt))
   set_progress $(awk -v num=$progress 'BEGIN { print num / 100}')
 
+  # System-As-Root check
+umount_all;
+setup_mountpoint $ANDROID_ROOT;
+if ! is_mounted $ANDROID_ROOT; then
+  $bb mount -o ro -t auto $ANDROID_ROOT;
+fi;
+case $ANDROID_ROOT in
+  /system_root) setup_mountpoint /system;;
+  /system)
+    if [ -f /system/system/build.prop ]; then
+      setup_mountpoint /system_root;
+      $bb mount --move /system /system_root;
+      if [ $? != 0 ]; then
+        $bb umount /system;
+        $bb umount -l /system 2>/dev/null;
+        $bb mount -o ro -t auto /dev/block/bootdevice/by-name/system /system_root;
+      fi;
+    fi;
+  ;;
+esac;
+if is_mounted /system_root; then
+  $bb mount -o bind /system_root/system /system;
+fi;
+$bb mount -o ro -t auto /vendor 2>/dev/null;
+if ! is_mounted /data; then
+  $bb mount /data;
+  umount_data=1;
+fi;
+
+savedpath="$LD_LIBRARY_PATH";
+savedpre="$LD_PRELOAD";
+unset LD_LIBRARY_PATH;
+unset LD_PRELOAD;
+
   # make a backup if set
   if [ "$backup" == 1 ]; then
     ui_print "  Backup APK"
@@ -185,7 +249,7 @@ for apkp_target in $apklist; do
   progress=$((progress + subamt))
   set_progress $(awk -v num=$progress 'BEGIN { print num / 100}')
  
-  # copy patched file back to system
+  # copy patched file back to /system
   ui_print "  Copy APK to Magisk Module"
   mkdir -p $MODPATH$sysfile
   cd $MODPATH$sysfile
@@ -274,6 +338,7 @@ cd /
 imageless_magisk || unmount_magisk_img
 $BOOTMODE || recovery_cleanup
 rm -rf $TMPDIR $MOUNTPATH
+restore_env;
 
 ui_print "- Done"
 exit 0
